@@ -1,33 +1,42 @@
 import os
-import json
-import threading
 import time
+import threading
+import traceback
 from datetime import datetime
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import traceback
 
-# ------------------ Quotex Import with Fallback ------------------
+# ------------------ Quotex Import with Multiple Fallbacks ------------------
+quotexpy_available = False
+Quotex = None
+
 try:
     from quotexpy import Quotex
+    quotexpy_available = True
     print("✓ Imported Quotex from quotexpy")
 except ImportError:
     try:
-        from quotexpy.main import Quotex
-        print("✓ Imported Quotex from quotexpy.main")
-    except ImportError as e:
-        print(f"✗ Failed to import Quotex: {e}")
-        Quotex = None
+        from quotexpy.quotex import Quotex
+        quotexpy_available = True
+        print("✓ Imported Quotex from quotexpy.quotex")
+    except ImportError:
+        try:
+            from quotexpy.main import Quotex
+            quotexpy_available = True
+            print("✓ Imported Quotex from quotexpy.main")
+        except ImportError as e:
+            print(f"✗ Failed to import Quotex: {e}")
+            print("Make sure quotexpy is installed: pip install quotexpy==1.40.7")
 
 # ------------------ Configuration ------------------
 app = Flask(__name__)
-CORS(app)  # Enable CORS for all routes
+CORS(app)
 
-# Credentials (hardcoded as requested)
+# Credentials
 EMAIL = "trrayhanislam786@gmail.com"
 PASSWORD = "Mdrayhan@655"
 
-# Global variables for Quotex client and connection status
+# Global variables
 quotex_client = None
 client_lock = threading.Lock()
 is_connected = False
@@ -39,6 +48,10 @@ def login_to_quotex():
     """Login to Quotex using Playwright with stealth and extract SSID"""
     global quotex_client, is_connected
     
+    if not quotexpy_available:
+        print(f"[{datetime.now()}] ✗ Quotexpy library not available")
+        return False
+    
     try:
         from playwright.sync_api import sync_playwright
         import playwright_stealth
@@ -46,7 +59,6 @@ def login_to_quotex():
         print(f"[{datetime.now()}] Starting Playwright stealth login...")
         
         with sync_playwright() as p:
-            # Launch browser with stealth settings
             browser = p.chromium.launch(
                 headless=True,
                 args=[
@@ -63,32 +75,24 @@ def login_to_quotex():
             )
             
             page = context.new_page()
-            
-            # Apply stealth
             playwright_stealth.stealth_sync(page)
             
-            # Navigate to Quotex
             page.goto('https://quotex.io/en', timeout=60000)
             time.sleep(2)
             
-            # Click login button
             page.click('button:has-text("Login")')
             time.sleep(1)
             
-            # Fill credentials
             page.fill('input[name="email"]', EMAIL)
             page.fill('input[name="password"]', PASSWORD)
             time.sleep(0.5)
             
-            # Submit
             page.click('button[type="submit"]')
-            time.sleep(5)  # Wait for login to complete
+            time.sleep(5)
             
-            # Get cookies
             cookies = context.cookies()
             browser.close()
             
-            # Extract SSID token
             ssid = None
             for cookie in cookies:
                 if cookie.get('name') == 'ssid':
@@ -98,20 +102,14 @@ def login_to_quotex():
             if ssid:
                 print(f"[{datetime.now()}] ✓ SSID extracted successfully")
                 
-                # Initialize Quotex client with SSID
                 with client_lock:
-                    global quotex_client
-                    if Quotex is not None:
-                        quotex_client = Quotex()
-                        quotex_client.set_ssid(ssid)
-                        is_connected = True
-                        print(f"[{datetime.now()}] ✓ Quotex client initialized with SSID")
-                    else:
-                        print(f"[{datetime.now()}] ✗ Quotex library not available")
-                        is_connected = False
+                    quotex_client = Quotex()
+                    quotex_client.set_ssid(ssid)
+                    is_connected = True
+                    print(f"[{datetime.now()}] ✓ Quotex client initialized")
                 return True
             else:
-                print(f"[{datetime.now()}] ✗ SSID not found in cookies")
+                print(f"[{datetime.now()}] ✗ SSID not found")
                 is_connected = False
                 return False
                 
@@ -129,23 +127,21 @@ def background_login_worker():
         try:
             current_time = time.time()
             if not is_connected or (current_time - last_connection_attempt) > RECONNECT_INTERVAL:
-                print(f"[{datetime.now()}] Attempting to connect to Quotex...")
+                print(f"[{datetime.now()}] Attempting to connect...")
                 last_connection_attempt = current_time
                 login_to_quotex()
             
-            # Keep connection alive with a ping every 30 seconds
             if is_connected and quotex_client:
                 try:
-                    # Simple ping to check connection
                     quotex_client.get_profile()
                 except:
-                    print(f"[{datetime.now()}] Connection lost, will reconnect")
+                    print(f"[{datetime.now()}] Connection lost")
                     is_connected = False
             
-            time.sleep(30)  # Check every 30 seconds
+            time.sleep(30)
             
         except Exception as e:
-            print(f"[{datetime.now()}] Background worker error: {e}")
+            print(f"[{datetime.now()}] Background error: {e}")
             time.sleep(60)
 
 # ------------------ Helper Functions ------------------
@@ -171,7 +167,6 @@ def fetch_candles(pair, count):
         raise Exception("Quotex client not connected. Please try again in a moment.")
     
     try:
-        # Using M1 timeframe as specified
         timeframe = "M1"
         candles = quotex_client.get_candles(pair, timeframe, count)
         
@@ -182,7 +177,6 @@ def fetch_candles(pair, count):
         current_time = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         
         for idx, candle in enumerate(candles):
-            # Handle different possible candle formats from quotexpy
             if isinstance(candle, dict):
                 candle_time = candle.get('time', candle.get('timestamp', ''))
                 open_price = candle.get('open', 0)
@@ -191,7 +185,6 @@ def fetch_candles(pair, count):
                 close_price = candle.get('close', 0)
                 volume = candle.get('volume', 48)
             else:
-                # If candle is a tuple or list
                 candle_time = candle[0] if len(candle) > 0 else ''
                 open_price = candle[1] if len(candle) > 1 else 0
                 high_price = candle[2] if len(candle) > 2 else 0
@@ -199,7 +192,6 @@ def fetch_candles(pair, count):
                 close_price = candle[4] if len(candle) > 4 else 0
                 volume = candle[5] if len(candle) > 5 else 48
             
-            # Convert timestamp to readable format if needed
             if isinstance(candle_time, (int, float)):
                 candle_time = datetime.fromtimestamp(candle_time).strftime("%Y-%m-%d %H:%M:%S")
             elif not candle_time:
@@ -233,11 +225,9 @@ def fetch_candles(pair, count):
 def get_candles():
     """Main endpoint to fetch historical candle data"""
     try:
-        # Get query parameters
         pair = request.args.get('pair', 'EURUSD_otc')
         count = request.args.get('count', 1)
         
-        # Validate count
         try:
             count = int(count)
             if count < 1:
@@ -247,7 +237,17 @@ def get_candles():
         except ValueError:
             count = 1
         
-        # Check connection
+        if not quotexpy_available:
+            return jsonify({
+                "Owner_Developer": "DARK-X-RAYHAN",
+                "Telegram": "@mdrayhan85",
+                "Channel": "https://t.me/mdrayhan85",
+                "success": False,
+                "count": 0,
+                "data": [],
+                "error": "quotexpy library not installed. Please check deployment."
+            }), 500
+        
         if not is_connected or quotex_client is None:
             return jsonify({
                 "Owner_Developer": "DARK-X-RAYHAN",
@@ -259,10 +259,8 @@ def get_candles():
                 "error": "Quotex client is not connected. Please wait for connection to establish."
             }), 503
         
-        # Fetch candles
         candle_data = fetch_candles(pair, count)
         
-        # Return success response
         return jsonify({
             "Owner_Developer": "DARK-X-RAYHAN",
             "Telegram": "@mdrayhan85",
@@ -293,21 +291,19 @@ def health_check():
     return jsonify({
         "status": "healthy",
         "connected": is_connected,
+        "quotexpy_available": quotexpy_available,
         "timestamp": datetime.now().isoformat()
     })
 
 # ------------------ Main Entry Point ------------------
 if __name__ == '__main__':
-    # Start background login thread
-    login_thread = threading.Thread(target=background_login_worker, daemon=True)
-    login_thread.start()
+    if quotexpy_available:
+        login_thread = threading.Thread(target=background_login_worker, daemon=True)
+        login_thread.start()
+        time.sleep(2)
+    else:
+        print("[WARNING] quotexpy not available. API will return errors.")
     
-    # Give initial login a moment to start
-    time.sleep(2)
-    
-    # Get port from environment variable (for Render)
     port = int(os.environ.get('PORT', 5000))
-    
-    # Run Flask app
     print(f"[{datetime.now()}] Starting Flask server on port {port}...")
     app.run(host='0.0.0.0', port=port, debug=False, threaded=True)
