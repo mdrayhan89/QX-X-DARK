@@ -1,0 +1,6 @@
+Flask==2.3.3
+flask-cors==4.0.0
+playwright==1.40.0
+playwright-stealth==1.0.6
+quotexpy==1.1.4
+requests==2.31.0
